@@ -4,12 +4,13 @@ const rateLimit = require("express-rate-limit");
 
 const router = express.Router();
 
-// Existing authentication controller
+// Authentication controller
 const {
   registerUser,
   verifyOTP,
   resendOTP,
   loginUser,
+  logoutUser,
 } = require("../controllers/authController");
 
 // Password reset controller
@@ -77,21 +78,18 @@ router.post("/login", loginUser);
 // FORGOT PASSWORD ROUTES
 // ========================================
 
-// Step 1: Request password reset OTP
 router.post(
   "/forgot-password",
   passwordResetLimiter,
   requestPasswordReset
 );
 
-// Step 2: Verify password reset OTP
 router.post(
   "/verify-reset-otp",
   passwordResetLimiter,
   verifyPasswordResetOTP
 );
 
-// Step 3: Save new password
 router.post(
   "/reset-password",
   passwordResetLimiter,
@@ -118,17 +116,6 @@ router.get("/me", protect, (req, res) => {
 // LOGOUT
 // ========================================
 
-router.post("/logout", (req, res) => {
-  res.clearCookie("token", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-  });
-
-  res.status(200).json({
-    success: true,
-    message: "Logged out successfully",
-  });
-});
+router.post("/logout", logoutUser);
 
 module.exports = router;

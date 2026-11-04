@@ -11,19 +11,26 @@ const OTP_EXPIRY_MINUTES = 5;
 const OTP_RESEND_SECONDS = 60;
 const MAX_OTP_ATTEMPTS = 5;
 
+// Normalize email
 const normalizeEmail = (email) =>
   String(email || "").trim().toLowerCase();
 
+// Generate 6-digit OTP
 const generateOTP = () =>
   crypto.randomInt(100000, 1000000).toString();
 
+// Hash OTP
 const hashOTP = (otp) => {
   return crypto
-    .createHmac("sha256", process.env.OTP_SECRET || process.env.JWT_SECRET)
+    .createHmac(
+      "sha256",
+      process.env.OTP_SECRET || process.env.JWT_SECRET
+    )
     .update(otp)
     .digest("hex");
 };
 
+// Email transporter
 const createTransporter = () => {
   if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
     throw new Error("Email configuration is missing in backend .env");
@@ -38,6 +45,7 @@ const createTransporter = () => {
   });
 };
 
+// Send OTP email
 const sendOTPEmail = async (email, name, otp) => {
   const transporter = createTransporter();
 
@@ -45,6 +53,7 @@ const sendOTPEmail = async (email, name, otp) => {
     from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
     to: email,
     subject: "Verify your ENROUTE account",
+
     text: `Hello ${name},
 
 Your ENROUTE verification OTP is ${otp}.
@@ -54,6 +63,7 @@ This OTP expires in 5 minutes. Do not share it with anyone.
 If you did not request this, you can ignore this email.
 
 ENROUTE Team`,
+
     html: `
       <div style="font-family:Arial,sans-serif;background:#f4f0e7;padding:30px">
         <div style="max-width:500px;margin:auto;background:#111a15;color:#f4f0e7;padding:35px;border-radius:12px">
@@ -72,7 +82,16 @@ ENROUTE Team`,
   });
 };
 
-// REGISTER: create pending registration and send OTP
+// Cookie options for login and logout
+const getCookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite:
+    process.env.NODE_ENV === "production" ? "none" : "lax",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+});
+
+// REGISTER USER
 const registerUser = async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -110,7 +129,9 @@ const registerUser = async (req, res) => {
       });
     }
 
-    const existingUser = await User.findOne({ email: cleanEmail });
+    const existingUser = await User.findOne({
+      email: cleanEmail,
+    });
 
     if (existingUser) {
       return res.status(409).json({
@@ -161,13 +182,16 @@ const registerUser = async (req, res) => {
     try {
       await sendOTPEmail(cleanEmail, cleanName, otp);
     } catch (emailError) {
-      await PendingRegistration.deleteOne({ email: cleanEmail });
+      await PendingRegistration.deleteOne({
+        email: cleanEmail,
+      });
 
       console.error("OTP email error:", emailError.message);
 
       return res.status(503).json({
         success: false,
-        message: "Unable to send OTP email. Check email configuration and try again.",
+        message:
+          "Unable to send OTP email. Check email configuration and try again.",
       });
     }
 
@@ -186,7 +210,7 @@ const registerUser = async (req, res) => {
   }
 };
 
-// VERIFY OTP: create the actual user only after successful verification
+// VERIFY OTP
 const verifyOTP = async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
@@ -234,7 +258,9 @@ const verifyOTP = async (req, res) => {
 
       return res.status(400).json({
         success: false,
-        message: `Incorrect OTP. ${MAX_OTP_ATTEMPTS - pending.otpAttempts} attempts remaining.`,
+        message: `Incorrect OTP. ${
+          MAX_OTP_ATTEMPTS - pending.otpAttempts
+        } attempts remaining.`,
       });
     }
 
@@ -297,7 +323,9 @@ const resendOTP = async (req, res) => {
       (Date.now() - pending.lastOtpSentAt.getTime()) / 1000;
 
     if (secondsSinceLastSend < OTP_RESEND_SECONDS) {
-      const wait = Math.ceil(OTP_RESEND_SECONDS - secondsSinceLastSend);
+      const wait = Math.ceil(
+        OTP_RESEND_SECONDS - secondsSinceLastSend
+      );
 
       return res.status(429).json({
         success: false,
@@ -386,12 +414,7 @@ const loginUser = async (req, res) => {
       { expiresIn: "7d" }
     );
 
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie("token", token, getCookieOptions());
 
     return res.status(200).json({
       success: true,
@@ -412,9 +435,34 @@ const loginUser = async (req, res) => {
   }
 };
 
+// LOGOUT USER
+const logoutUser = async (req, res) => {
+  try {
+    const cookieOptions = getCookieOptions();
+
+    // maxAge is not needed when clearing the cookie
+    delete cookieOptions.maxAge;
+
+    res.clearCookie("token", cookieOptions);
+
+    return res.status(200).json({
+      success: true,
+      message: "Logout successful",
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Logout failed",
+    });
+  }
+};
+
 module.exports = {
   registerUser,
   verifyOTP,
   resendOTP,
   loginUser,
+  logoutUser,
 };
