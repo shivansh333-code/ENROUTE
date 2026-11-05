@@ -4,8 +4,8 @@ const PendingRegistration = require("../models/PendingRegistration");
 
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const nodemailer = require("nodemailer");
 const crypto = require("crypto");
+const { Resend } = require("resend");
 
 const OTP_EXPIRY_MINUTES = 5;
 const OTP_RESEND_SECONDS = 60;
@@ -15,43 +15,59 @@ const MAX_OTP_ATTEMPTS = 5;
 const normalizeEmail = (email) =>
   String(email || "").trim().toLowerCase();
 
-// Generate 6-digit OTP
+// Escape user-provided text before inserting it into HTML
+const escapeHTML = (value) =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
+// Generate a six-digit OTP
 const generateOTP = () =>
   crypto.randomInt(100000, 1000000).toString();
 
 // Hash OTP
 const hashOTP = (otp) => {
+  const secret = process.env.OTP_SECRET || process.env.JWT_SECRET;
+
+  if (!secret) {
+    throw new Error("OTP_SECRET or JWT_SECRET is missing");
+  }
+
   return crypto
-    .createHmac(
-      "sha256",
-      process.env.OTP_SECRET || process.env.JWT_SECRET
-    )
+    .createHmac("sha256", secret)
     .update(otp)
     .digest("hex");
 };
 
-// Email transporter
-const createTransporter = () => {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
-    throw new Error("Email configuration is missing in backend .env");
+// Create Resend client
+const getResendClient = () => {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error("RESEND_API_KEY is missing");
   }
 
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_APP_PASSWORD,
-    },
-  });
+  return new Resend(process.env.RESEND_API_KEY);
 };
 
-// Send OTP email
-const sendOTPEmail = async (email, name, otp) => {
-  const transporter = createTransporter();
+// Get sender email
+const getEmailSender = () => {
+  return (
+    process.env.EMAIL_FROM ||
+    "ENROUTE <onboarding@resend.dev>"
+  );
+};
 
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
-    to: email,
+// Send registration OTP email
+const sendOTPEmail = async (email, name, otp) => {
+  const resend = getResendClient();
+
+  const safeName = escapeHTML(name);
+
+  const { data, error } = await resend.emails.send({
+    from: getEmailSender(),
+    to: [email],
     subject: "Verify your ENROUTE account",
 
     text: `Hello ${name},
@@ -69,7 +85,7 @@ ENROUTE Team`,
         <div style="max-width:500px;margin:auto;background:#111a15;color:#f4f0e7;padding:35px;border-radius:12px">
           <h1 style="letter-spacing:5px">ENROUTE</h1>
           <h2>Verify your email</h2>
-          <p>Hello ${name},</p>
+          <p>Hello ${safeName},</p>
           <p>Use this six-digit OTP to verify your account:</p>
           <div style="font-size:32px;letter-spacing:10px;font-weight:bold;background:#26372d;padding:18px;text-align:center">
             ${otp}
@@ -80,6 +96,12 @@ ENROUTE Team`,
       </div>
     `,
   });
+
+  if (error) {
+    throw new Error(error.message || "Failed to send OTP email");
+  }
+
+  return data;
 };
 
 // Cookie options for login and logout
@@ -190,8 +212,7 @@ const registerUser = async (req, res) => {
 
       return res.status(503).json({
         success: false,
-        message:
-          "Unable to send OTP email. Check email configuration and try again.",
+        message: "Unable to send OTP email. Please try again later.",
       });
     }
 
@@ -334,16 +355,12 @@ const resendOTP = async (req, res) => {
     }
 
     const otp = generateOTP();
-
-    pending.otpHash = hashOTP(otp);
-    pending.otpExpiresAt = new Date(
+    const otpHash = hashOTP(otp);
+    const expiresAt = new Date(
       Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000
     );
-    pending.otpAttempts = 0;
-    pending.lastOtpSentAt = new Date();
 
-    await pending.save();
-
+    // Send first. Update the saved OTP only after successful delivery.
     try {
       await sendOTPEmail(email, pending.name, otp);
     } catch (emailError) {
@@ -354,6 +371,13 @@ const resendOTP = async (req, res) => {
         message: "Unable to send OTP email. Please try again later.",
       });
     }
+
+    pending.otpHash = otpHash;
+    pending.otpExpiresAt = expiresAt;
+    pending.otpAttempts = 0;
+    pending.lastOtpSentAt = new Date();
+
+    await pending.save();
 
     return res.status(200).json({
       success: true,
@@ -408,6 +432,10 @@ const loginUser = async (req, res) => {
       });
     }
 
+    if (!process.env.JWT_SECRET) {
+      throw new Error("JWT_SECRET is missing");
+    }
+
     const token = jwt.sign(
       { id: user._id },
       process.env.JWT_SECRET,
@@ -440,7 +468,6 @@ const logoutUser = async (req, res) => {
   try {
     const cookieOptions = getCookieOptions();
 
-    // maxAge is not needed when clearing the cookie
     delete cookieOptions.maxAge;
 
     res.clearCookie("token", cookieOptions);
